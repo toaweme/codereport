@@ -1,0 +1,207 @@
+name: codereport
+description: Install the codereport CLI from a verified release and publish a repo's code.json view to code.toawe.me.
+author: toaweme
+
+branding:
+  icon: code
+  color: blue
+
+inputs:
+  install-only:
+    description: >-
+      Install and verify codereport, then stop - skip generating and publishing
+      the report. Use this when you only need codereport on PATH to run it
+      yourself in a later step.
+    required: false
+    default: "false"
+  version:
+    description: >-
+      Release tag to install, e.g. v0.1.0. You usually don't need to set this:
+      each release commit bumps this default to the matching tag, so pinning the
+      action to a tag or a commit SHA installs the right binary on its own.
+    required: false
+    default: "v0.0.1"
+  dir:
+    description: >-
+      Directory to read, codereport's -s/--source, for a module in a subdirectory
+      with its own go.mod. The report still lands at the workspace root.
+    required: false
+    default: "."
+  output:
+    description: >-
+      Path (relative to the workspace) to write the code view to. Defaults to
+      code.json; it is written even when publishing so the run keeps a copy.
+    required: false
+    default: "code.json"
+  publish-url:
+    description: >-
+      POST the report to this endpoint. codeviewer's hosted dashboard is
+      https://code.toawe.me/ingest?kind=code. Needs id-token: write to mint the OIDC
+      token (audience is the URL origin). Without it publishing is skipped.
+    required: false
+    default: ""
+  publish-timeout:
+    description: >-
+      Max seconds to wait on each publish call (OIDC token mint and the POST itself).
+      Raise it for a slow endpoint.
+    required: false
+    default: "30"
+  verify:
+    description: >-
+      Verify the cosign signature on checksums.txt before trusting the download.
+      Turn off only for an unsigned release (e.g. the v0.0.1 bootstrap) or an
+      air-gapped runner without Sigstore access. The sha-256 checksum is always
+      verified regardless.
+    required: false
+    default: "true"
+
+outputs:
+  report-path:
+    description: Path to the code.json report in the workspace, empty if none was produced.
+    value: ${{ steps.report.outputs.report-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install cosign
+      if: inputs.verify == 'true'
+      # v4.1.2 (https://github.com/sigstore/cosign-installer/releases/tag/v4.1.2)
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+
+    - name: Install codereport
+      shell: bash
+      env:
+        CODEREPORT_VERSION: ${{ inputs.version }}
+        CODEREPORT_VERIFY: ${{ inputs.verify }}
+      run: |
+        set -euo pipefail
+
+        ref="$CODEREPORT_VERSION"
+        if [ -z "$ref" ]; then
+          echo "::error::could not determine codereport version: pass 'version' or pin the action to a release" >&2
+          exit 1
+        fi
+        # goreleaser tags carry a leading v in the URL path but strip it in the
+        # asset filename, so keep both forms.
+        tag="$ref"; [ "${tag#v}" = "$tag" ] && tag="v$tag"
+        version="${tag#v}"
+
+        case "$RUNNER_OS" in
+          Linux)   os=linux ;;
+          macOS)   os=darwin ;;
+          Windows) os=windows ;;
+          *) echo "::error::unsupported runner OS: $RUNNER_OS" >&2; exit 1 ;;
+        esac
+        case "$RUNNER_ARCH" in
+          X64)   arch=x64 ;;
+          ARM64) arch=arm64 ;;
+          *) echo "::error::unsupported runner arch: $RUNNER_ARCH" >&2; exit 1 ;;
+        esac
+
+        ext=tar.gz; bin=codereport
+        if [ "$os" = "windows" ]; then ext=zip; bin=codereport.exe; fi
+        asset="codereport_${version}_${os}_${arch}.${ext}"
+        base="https://github.com/toaweme/codereport/releases/download/${tag}"
+
+        work="$(mktemp -d)"
+        cd "$work"
+
+        echo "downloading ${asset} (${tag})"
+        curl -fsSL -o "$asset" "${base}/${asset}"
+        curl -fsSL -o checksums.txt "${base}/checksums.txt"
+
+        if [ "$CODEREPORT_VERIFY" = "true" ]; then
+          curl -fsSL -o checksums.txt.sigstore.json "${base}/checksums.txt.sigstore.json"
+          echo "verifying cosign signature on checksums.txt"
+          # the release workflow (in toaweme/docgen) signs keyless via GitHub OIDC;
+          # the cert SAN is that release.yml at the tag ref.
+          cosign verify-blob \
+            --bundle checksums.txt.sigstore.json \
+            --certificate-identity-regexp "^https://github\.com/toaweme/docgen/\.github/workflows/release\.yml@refs/tags/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            checksums.txt
+        else
+          echo "::warning::cosign verification disabled (verify=false); sha-256 checksum still enforced"
+        fi
+
+        echo "verifying sha-256 of ${asset}"
+        expected="$(awk -v f="$asset" '$2 == f { print $1 }' checksums.txt)"
+        if [ -z "$expected" ]; then
+          echo "::error::${asset} not listed in checksums.txt" >&2
+          exit 1
+        fi
+        if command -v sha256sum >/dev/null 2>&1; then
+          actual="$(sha256sum "$asset" | awk '{ print $1 }')"
+        else
+          actual="$(shasum -a 256 "$asset" | awk '{ print $1 }')"
+        fi
+        if [ "$expected" != "$actual" ]; then
+          echo "::error::checksum mismatch for ${asset}: expected ${expected}, got ${actual}" >&2
+          exit 1
+        fi
+
+        tar -xf "$asset"
+        install_dir="${RUNNER_TEMP}/codereport-bin"
+        mkdir -p "$install_dir"
+        mv "$bin" "$install_dir/"
+        chmod +x "$install_dir/$bin" || true
+        echo "$install_dir" >> "$GITHUB_PATH"
+
+        cd /
+        rm -rf "$work"
+        echo "installed codereport ${tag} to ${install_dir}"
+
+    - name: Generate code report
+      id: report
+      # generate the code.json for the repo. codereport reads the Go source with
+      # codereader, which type-checks, so the repo's own dependencies must be
+      # resolvable in the job (public deps via the proxy; private deps need the
+      # job to have configured git credentials before this action runs).
+      if: inputs.install-only != 'true'
+      shell: bash
+      env:
+        CODEREPORT_DIR: ${{ inputs.dir }}
+        CODEREPORT_OUTPUT: ${{ inputs.output }}
+      run: |
+        set -uo pipefail
+        report="${CODEREPORT_OUTPUT:-report.code.json}"
+        out="${GITHUB_WORKSPACE}/${report}"
+        if codereport -s "$CODEREPORT_DIR" -o "$out"; then
+          echo "report-path=$report" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::codereport failed to generate a report for ${CODEREPORT_DIR}"
+          echo "report-path=" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Publish report
+      # publish when there is somewhere to send it and a report was produced.
+      # always() so this still runs after an earlier failing step in the job.
+      if: always() && inputs.install-only != 'true' && inputs.publish-url != '' && steps.report.outputs.report-path != ''
+      shell: bash
+      env:
+        PUBLISH_URL: ${{ inputs.publish-url }}
+        REPORT_PATH: ${{ steps.report.outputs.report-path }}
+        PUBLISH_TIMEOUT: ${{ inputs.publish-timeout }}
+      run: |
+        set -euo pipefail
+        url="$PUBLISH_URL"
+        report="$REPORT_PATH"
+        timeout="$PUBLISH_TIMEOUT"
+        if [ ! -s "$report" ]; then
+          echo "No report to publish"
+          exit 0
+        fi
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+          echo "::warning::skipping publish to ${url} - needs 'permissions: id-token: write' on the job"
+          exit 0
+        fi
+        # audience is the endpoint's origin (scheme + host), which the receiver
+        # validates. the URL is POSTed verbatim so any engine's path/query works.
+        audience="$(printf '%s' "$url" | sed -E 's#^(https?://[^/]+).*#\1#')"
+        token="$(curl -sS --max-time "$timeout" \
+          -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${audience}" | jq -r .value)"
+        curl -fsS --max-time "$timeout" -X POST "$url" \
+          -H "Authorization: Bearer $token" \
+          --data-binary @"$report"
+        printf '\nPublished code report to %s\n' "$url"
