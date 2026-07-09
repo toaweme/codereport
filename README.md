@@ -10,8 +10,7 @@ it to the [code.toawe.me](https://code.toawe.me) dashboard, so it renders that
 repo's packages, types, and stats next to its `care` health report.
 
 This repo holds **no source**, only the GitHub Action below and the released
-binaries. Both are built and released from
-[toaweme/docgen](https://github.com/toaweme/docgen); nothing here is hand-edited.
+binaries.
 
 ## Usage
 
@@ -32,8 +31,7 @@ steps:
 ```
 
 The report is produced by type-checking the repo, so the job must be able to
-resolve the repo's own Go dependencies. Public dependencies work out of the box;
-private ones need the job to configure git credentials before this step.
+resolve the repo's own Go dependencies.
 
 ### Inputs
 
