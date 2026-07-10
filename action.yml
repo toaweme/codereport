@@ -20,7 +20,7 @@ inputs:
       each release commit bumps this default to the matching tag, so pinning the
       action to a tag or a commit SHA installs the right binary on its own.
     required: false
-    default: "v0.2.0"
+    default: "v0.3.0"
   dir:
     description: >-
       Directory to read, codereport's -s/--source, for a module in a subdirectory
