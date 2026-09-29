@@ -38,6 +38,8 @@ inputs:
       POST the report to this endpoint. codeviewer's hosted dashboard is
       https://code.toawe.me/ingest?kind=code. Needs id-token: write to mint the OIDC
       token (audience is the URL origin). Without it publishing is skipped.
+      Publishing only happens on the default branch or a tag, so pull requests and
+      feature branches still generate the report without reaching the dashboard.
     required: false
     default: ""
   publish-timeout:
@@ -175,8 +177,10 @@ runs:
 
     - name: Publish report
       # publish when there is somewhere to send it and a report was produced.
-      # always() so this still runs after an earlier failing step in the job.
-      if: always() && inputs.install-only != 'true' && inputs.publish-url != '' && steps.report.outputs.report-path != ''
+      # always() so this still runs after an earlier failing step in the job. Only
+      # the default branch and tags publish, so a dashboard tracks main and
+      # releases rather than every pull request that ran the action.
+      if: always() && inputs.install-only != 'true' && inputs.publish-url != '' && steps.report.outputs.report-path != '' && (github.ref_type == 'tag' || github.ref_name == github.event.repository.default_branch)
       shell: bash
       env:
         PUBLISH_URL: ${{ inputs.publish-url }}

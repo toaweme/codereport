@@ -37,7 +37,7 @@ resolve the repo's own Go dependencies.
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `publish-url` | `""` | Endpoint to POST the report to. Omit to only generate. |
+| `publish-url` | `""` | Endpoint to POST the report to. Omit to only generate. Only the default branch and tags publish. |
 | `dir` | `.` | Directory to read, for a module in a subdirectory with its own `go.mod`. |
 | `output` | `code.json` | Where the report is written in the workspace. |
 | `version` | pinned per release | Release tag to install. Usually leave unset. |
